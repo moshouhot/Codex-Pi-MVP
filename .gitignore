@@ -1,0 +1,42 @@
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build artifacts
+*.egg-info/
+/build/
+/dist/
+.eggs/
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Pi run artifacts
+/runs/
+/.ai/
+
+# Local development/validation evidence
+/docs/validation/
+/docs/superpowers/
+/MVP_STATUS.md
+
+# Delegated scratch workspace (keep the directory itself)
+/work/*
+!/work/.gitkeep
+
+# Diagnostics / runtime scratch
+/diagnostics/
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-delegate"
+version = "0.2.0"
+description = "Reliable headless Codex-to-Pi delegation CLI"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+pi-delegate = "pi_delegate.cli:main"
+
+[tool.setuptools]
+packages = ["pi_delegate"]
+

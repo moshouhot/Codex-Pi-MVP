@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Pi Delegate"
+  short_description: "Codex plans and accepts; Pi implements and debugs."
+
