@@ -28,6 +28,8 @@ Prefer Pi for work that is execution-heavy and evidence-producing:
 
 Do not send an entire vague project to Pi. Give one coherent bounded task with a concrete contract.
 
+Do not size a task around the one-hour hard timeout. The 3600-second limit is a safety ceiling, not a target runtime. If the work naturally contains several independently verifiable stages, split it before delegation.
+
 Do not ask Pi to decide its own acceptance criteria for a consequential task. Codex defines them first.
 
 Do not accept a worker statement such as “all tests pass” without checking the real files and rerunning the meaningful checks.

@@ -30,20 +30,23 @@ For critical code, let Pi implement only after Codex defines the design constrai
 3. Create a run directory inside the target project, preferably `.ai/pi/runs/<task-id>/`, and write `TASK.md` using `references/task-contract.md`.
 4. Establish the local execution channel and bootstrap the runtime using `references/runtime-bootstrap.md`. In web/cloud Codex, use `coding-tools-mcp` when available; in local Codex, use the direct local shell. Prefer `python -m pi_delegate doctor` as the canonical check.
 5. If module `pi_delegate` alone is missing and a local execution channel exists, self-heal by locating the verified source and running editable installation as defined in `references/runtime-bootstrap.md`. Do not reinstall for Node, Pi CLI, provider/model, timeout, or API failures.
-6. Execute Pi headlessly: `python -m pi_delegate run <task-file> --project <project-root>`. Add `--provider`, `--model`, or `--thinking` only when the task requires explicit routing.
-7. Treat `RUN_STATE.json`, `RUN_RESULT.json`, `RESULT.json`, `REPORT.md`, stdout, and stderr as worker evidence, not final truth.
-8. Read `RUN_RESULT.json`, `RESULT.json`, and `REPORT.md` as distinct artifacts; do not infer one from another. If a coding-tools-mcp read returns null, a mismatched resolved path, or `NOT_FOUND`, correct cwd-relative path resolution and retry once before classifying the evidence gap. Follow `references/acceptance-policy.md`.
-9. Independently inspect the real repository state and rerun the important acceptance checks. Codex must explicitly make the final `PASS / FAIL / BLOCKED` decision.
-10. If verification finds a concrete defect, create a new repair task that states the observed failure and expected correction. Delegate again rather than silently accepting or endlessly patching around symptoms.
-11. Report the final status only from Codex's independent evidence.
+6. Choose the execution mode using `references/supervision-policy.md`. For Web/Cloud Codex, prefer detached `python -m pi_delegate start <task-file> --project <project-root>` for nontrivial, debugging, or uncertain-duration work, then poll `status`/`logs`; use blocking `run` only for clearly short tasks. Local Codex may use either form.
+7. Supervise rather than wait blindly. Default idle timeout is 300 seconds without Pi JSON activity; default hard timeout is 3600 seconds. Treat the hard limit as a safety ceiling, not a planning target. Split tasks that could plausibly consume most of the hour.
+8. Treat `RUN_STATE.json`, `RUN_RESULT.json`, `RESULT.json`, `REPORT.md`, stdout, and stderr as worker evidence, not final truth. Use `last_event_type`, `last_tool_name`, `last_progress`, and `idle_seconds` to understand whether Pi is thinking, using tools, retrying, settled, or stalled; never expose hidden thinking content.
+9. Read `RUN_RESULT.json`, `RESULT.json`, and `REPORT.md` as distinct artifacts; do not infer one from another. If a coding-tools-mcp read returns null, a mismatched resolved path, or `NOT_FOUND`, correct cwd-relative path resolution and retry once before classifying the evidence gap. Follow `references/acceptance-policy.md`.
+10. Independently inspect the real repository state and rerun the important acceptance checks. Codex must explicitly make the final `PASS / FAIL / BLOCKED` decision.
+11. If verification finds a concrete defect or an idle timeout, inspect partial logs/diff/evidence first, then create a smaller repair task with the observed failure and expected correction. Do not blindly rerun the same oversized task.
+12. Report the final status only from Codex's independent evidence.
 
 ## Non-negotiable runner contract
 
 Preserve these behaviors when troubleshooting or evolving the CLI:
 - invoke the Pi Node CLI directly in headless mode;
+- use Pi `--mode json` so structured agent/tool/retry events provide the activity signal;
 - use `--no-session` for delegated runs unless persistence is intentionally required;
 - close stdin explicitly (`DEVNULL`/EOF) so Pi does not wait forever in non-TTY mode;
-- keep the inner worker timeout comfortably below the outer tool/process timeout;
+- for Web/Cloud long tasks, detach the local supervisor with `start` instead of attempting to keep one coding-tools-mcp command open for the full worker lifetime;
+- default to a 300-second idle timeout and 3600-second hard timeout unless the task requires a stricter bound;
 - persist `RUN_STATE.json` and `RUN_RESULT.json` for completion and failure paths;
 - require valid worker `RESULT.json` plus `REPORT.md` before the runner declares `COMPLETED`;
 - never equate Pi exit code 0 with Codex acceptance.

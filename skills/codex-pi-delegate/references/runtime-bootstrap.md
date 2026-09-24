@@ -96,3 +96,16 @@ pi-delegate doctor
 
 If those fail while `python -m pi_delegate doctor` is `READY`, continue using the canonical Python-module form instead of treating PATH as a blocker.
 
+## 6. Web long-task entrypoint
+
+After `doctor` is `READY`, do not keep a long/uncertain Pi job inside one Web execution-bridge call. Use the detached supervisor workflow from `supervision-policy.md`:
+
+```powershell
+python -m pi_delegate start <TASK.md> --project <project-root>
+python -m pi_delegate status <run-dir>
+python -m pi_delegate logs <run-dir> --tail 50
+python -m pi_delegate result <run-dir>
+```
+
+Use blocking `run` only when the task is predictably short.
+

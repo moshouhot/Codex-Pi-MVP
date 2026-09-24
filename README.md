@@ -17,6 +17,10 @@ v0.2 增加 runtime bootstrap/self-healing：Web/Cloud Codex 使用 `coding-tool
 
 v0.2.1 进一步固化 coding-tools-mcp 的工具级路径规则和独立证据读取：`apply_patch` 使用 workspace-root-relative 路径；`read_file/list_dir` 使用 default-cwd-relative 路径；验收必须分别读取 Runner/Worker/Report 证据并由 Codex 独立给出最终状态。
 
+v0.3 把固定 240 秒黑盒等待升级为 Supervisor：默认 **300 秒无 Pi 活动判定卡住**，总 hard timeout 为 **3600 秒**。Runner 使用 Pi 官方 `--mode json` 事件流，所以模型思考增量、tool call/tool execution、自动重试等都会刷新 activity；`RUN_STATE.json` 会记录 PID、elapsed、idle、last_activity、last_event_type、last_tool_name、last_progress 和超时配置。原始 JSONL 事件持续写入 `stdout.txt`，诊断写入 `stderr.txt`。3600 秒只是保险上限；Codex 应优先拆分任务，使单个委派明显早于该上限完成。
+
+Web/Cloud Codex 不应为长任务一直阻塞在一条 `exec_command` 上。由于 coding-tools-mcp 单条执行本身有更短的上限，推荐使用 `start` 启动本机 detached supervisor，然后用 `status` / `logs` 轮询，完成后再读取 `result` 并独立验收。
+
 ## MVP 流程
 
 1. Codex 写入 `runs/<task-id>/TASK.md`。
@@ -49,6 +53,21 @@ python -m pi_delegate run runs/real-001/TASK.md --project .
 python -m pi_delegate status runs/real-001
 python -m pi_delegate result runs/real-001
 ```
+
+长任务 / Web Codex 推荐：
+
+```powershell
+python -m pi_delegate start .ai/pi/runs/debug-001/TASK.md --project .
+python -m pi_delegate status .ai/pi/runs/debug-001
+python -m pi_delegate logs .ai/pi/runs/debug-001 --tail 50
+python -m pi_delegate result .ai/pi/runs/debug-001
+```
+
+默认监督参数：
+
+- `--idle-timeout 300`：5 分钟没有 Pi JSON 事件或 stderr 活动即判定卡住并终止；
+- `--hard-timeout 3600`：单任务绝对上限 1 小时；
+- 旧 `--timeout N` 仍兼容，并作为 hard timeout 覆盖值。
 
 `python -m pi_delegate` 是规范入口，不依赖 Python Scripts 是否在 PATH。安装为标准 CLI 后也可直接使用 `pi-delegate` 命令；项目仍保留 `python pi_runner.py run <task-id>` 兼容旧 MVP 用法。
 
