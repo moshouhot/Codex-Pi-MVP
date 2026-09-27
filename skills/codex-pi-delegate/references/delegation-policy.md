@@ -38,6 +38,8 @@ Do not send an entire vague project to Pi. Give one coherent bounded task with a
 
 In Web/Cloud mode, do not delegate simply to save Codex effort, time, or context. Pi is fallback capacity for a real capability/reliability gap (or an explicit user request), not a default worker.
 
+For real local browser/CDP/Cent control, prefer Pi with the local `cent-cdp-browser` Skill. This is a specialized execution route, not permission to delegate unrelated analysis or web research.
+
 Do not size a task around the one-hour hard timeout. The 3600-second limit is a safety ceiling, not a target runtime. If the work naturally contains several independently verifiable stages, split it before delegation.
 
 Do not ask Pi to decide its own acceptance criteria for a consequential task. Codex defines them first.

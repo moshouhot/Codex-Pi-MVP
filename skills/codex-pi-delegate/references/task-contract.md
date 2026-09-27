@@ -28,6 +28,9 @@ Use a task packet under the target project, preferably:
 - <interfaces/invariants/compatibility requirements>
 - Do not change acceptance tests merely to make them pass unless explicitly requested.
 
+## Preferred local skill
+- <optional specialized Skill the worker should use first, for example `cent-cdp-browser` for real browser/CDP/Cent control>
+
 ## Work
 <implementation/debugging work Pi should perform>
 

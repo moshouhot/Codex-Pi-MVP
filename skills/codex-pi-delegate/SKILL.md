@@ -1,6 +1,6 @@
 ---
 name: codex-pi-delegate
-description: Route coding work between Codex and a local headless Pi worker. Use for Codex/Pi controller-worker workflows, local implementation/debugging/build-test delegation, or when Web/Cloud Codex may need a local Pi fallback through coding-tools-mcp. In Web/Cloud sessions, keep execution with Codex by default and delegate only work Codex cannot reliably complete with its available tools. In local Codex sessions, keep the established controller-worker split where Codex plans/audits and Pi implements/debugs/tests.
+description: Route coding work between Codex and a local headless Pi worker. Use for Codex/Pi controller-worker workflows, local implementation/debugging/build-test delegation, when Web/Cloud Codex may need a local Pi fallback through coding-tools-mcp, or when work needs real local browser/CDP/Cent control. In Web/Cloud sessions, keep execution with Codex by default and delegate only work Codex cannot reliably complete with its available tools; for real browser/CDP/Cent control, prefer the local worker with cent-cdp-browser. In local Codex sessions, keep the established controller-worker split where Codex plans/audits and Pi implements/debugs/tests.
 ---
 
 # Codex Pi Delegate
@@ -28,14 +28,15 @@ Keep the established split unchanged:
 1. Inspect the target repository/context and determine whether this is Web/Cloud Codex or local Codex. Read `references/execution-routing.md` first.
 2. In Web/Cloud mode, attempt the work with Codex's own available tools/connectors. Do not bootstrap or probe Pi yet. In local mode, use the existing delegation policy from `references/delegation-policy.md`.
 3. In Web/Cloud mode, escalate only when a concrete Pi fallback condition from `execution-routing.md` is met. If only one portion is blocked, delegate only that portion rather than handing the whole task to Pi.
-4. When Pi will actually be used, define one bounded task with observable acceptance criteria, create `.ai/pi/runs/<task-id>/TASK.md` using `references/task-contract.md`, then establish/bootstrap the local runtime from `references/runtime-bootstrap.md`.
-5. If module `pi_delegate` alone is missing and a local execution channel exists, self-heal as defined in `runtime-bootstrap.md`. Do not reinstall for Node, Pi CLI, provider/model, timeout, or API failures.
-6. Choose blocking vs detached Pi execution using `references/supervision-policy.md`. Supervise rather than wait blindly. Default idle timeout is 300 seconds without Pi JSON activity; default hard timeout is 3600 seconds and is only a safety ceiling.
-7. Treat `RUN_STATE.json`, `RUN_RESULT.json`, `RESULT.json`, `REPORT.md`, stdout, and stderr as worker evidence, not final truth. Use `last_event_type`, `last_tool_name`, `last_progress`, and `idle_seconds` for operational telemetry; never expose hidden thinking content.
-8. When Pi was used, read `RUN_RESULT.json`, `RESULT.json`, and `REPORT.md` as distinct artifacts and follow `references/acceptance-policy.md`.
-9. Independently inspect the real repository state and rerun the important acceptance checks. Codex must explicitly make the final `PASS / FAIL / BLOCKED` decision whether or not Pi was used.
-10. If verification finds a defect or idle timeout, inspect partial logs/diff/evidence first, then create a smaller repair task when Pi is still the appropriate executor. Do not blindly rerun the same oversized task.
-11. Report the final status only from Codex's independent evidence.
+4. If the delegated work requires real browser/CDP/Cent control on the user's machine, use the specialized browser route in `execution-routing.md`: keep the surrounding task with Codex, but tell the local worker to prefer `cent-cdp-browser` for that browser-control portion.
+5. When Pi will actually be used, define one bounded task with observable acceptance criteria, create `.ai/pi/runs/<task-id>/TASK.md` using `references/task-contract.md`, then establish/bootstrap the local runtime from `references/runtime-bootstrap.md`.
+6. If module `pi_delegate` alone is missing and a local execution channel exists, self-heal as defined in `runtime-bootstrap.md`. Do not reinstall for Node, Pi CLI, provider/model, timeout, or API failures.
+7. Choose blocking vs detached Pi execution using `references/supervision-policy.md`. Supervise rather than wait blindly. Default idle timeout is 300 seconds without Pi JSON activity; default hard timeout is 3600 seconds and is only a safety ceiling.
+8. Treat `RUN_STATE.json`, `RUN_RESULT.json`, `RESULT.json`, `REPORT.md`, stdout, and stderr as worker evidence, not final truth. Use `last_event_type`, `last_tool_name`, `last_progress`, and `idle_seconds` for operational telemetry; never expose hidden thinking content.
+9. When Pi was used, read `RUN_RESULT.json`, `RESULT.json`, and `REPORT.md` as distinct artifacts and follow `references/acceptance-policy.md`.
+10. Independently inspect the real repository state and rerun the important acceptance checks. Codex must explicitly make the final `PASS / FAIL / BLOCKED` decision whether or not Pi was used.
+11. If verification finds a defect or idle timeout, inspect partial logs/diff/evidence first, then create a smaller repair task when Pi is still the appropriate executor. Do not blindly rerun the same oversized task.
+12. Report the final status only from Codex's independent evidence.
 
 ## Non-negotiable runner contract
 
