@@ -1,42 +1,41 @@
 ---
 name: codex-pi-delegate
-description: Delegate local coding implementation, debugging, build/test loops, repetitive engineering work, and evidence collection from Codex/ChatGPT to a headless Pi worker through pi-delegate while keeping architecture, task decomposition, core algorithm decisions, root-cause judgment, and final acceptance with Codex. Use when a local software task should follow a controller-worker workflow such as “Codex plans and audits; Pi implements and debugs”, including web/cloud Codex sessions that must use coding-tools-mcp as the local execution bridge and local Codex sessions with direct shell access.
+description: Route coding work between Codex and a local headless Pi worker. Use for Codex/Pi controller-worker workflows, local implementation/debugging/build-test delegation, or when Web/Cloud Codex may need a local Pi fallback through coding-tools-mcp. In Web/Cloud sessions, keep execution with Codex by default and delegate only work Codex cannot reliably complete with its available tools. In local Codex sessions, keep the established controller-worker split where Codex plans/audits and Pi implements/debugs/tests.
 ---
 
 # Codex Pi Delegate
 
-Use Codex as the controller and Pi as the execution worker. Keep the user in one Codex conversation; do not require manual Pi operation.
+Keep the user in one Codex conversation; do not require manual Pi operation. First choose the execution route from `references/execution-routing.md`.
 
-## Core responsibility split
+## Execution modes
 
-Keep these with Codex:
-- architecture and overall plan;
-- task decomposition and scope;
-- public contracts, invariants, state machines, and core algorithm decisions;
-- root-cause judgment when debugging matters;
-- independent review and final `PASS / FAIL / BLOCKED` decision.
+### Web / Cloud Codex: Codex-first
 
-Delegate these to Pi by default:
-- ordinary implementation and refactoring within a defined contract;
-- build errors, repetitive fixes, test writing, test execution, logs, and debugging experiments;
-- glue code, scripts, CI chores, documentation cleanup, and evidence collection.
+Codex should perform the task itself with its available tools and connectors whenever it can do so reliably. Pi is a fallback, not the default executor. Do not invoke Pi merely because Pi is installed or because the task involves coding, debugging, tests, Git, or local files.
 
-For critical code, let Pi implement only after Codex defines the design constraints. Review those changes line-by-line before acceptance.
+Escalate only the blocked/local-only portion to Pi when a concrete fallback reason exists. Codex still owns architecture, root-cause judgment, integration, review, and final acceptance.
+
+### Local Codex: existing controller-worker mode
+
+Keep the established split unchanged:
+
+- Codex owns architecture, plan, task decomposition, contracts/invariants, core algorithm decisions, root-cause judgment, review, and final `PASS / FAIL / BLOCKED`.
+- Pi handles ordinary implementation/refactoring within the contract, build/test loops, repetitive fixes, debugging experiments, scripts, CI/glue/docs cleanup, and evidence collection.
+- For critical code, freeze design constraints before Pi implements and review the changes independently before acceptance.
 
 ## Workflow
 
-1. Inspect the target repository and understand the current baseline before delegation.
-2. Define one bounded task with observable acceptance criteria. Read `references/delegation-policy.md` when deciding what stays with Codex versus Pi.
-3. Create a run directory inside the target project, preferably `.ai/pi/runs/<task-id>/`, and write `TASK.md` using `references/task-contract.md`.
-4. Establish the local execution channel and bootstrap the runtime using `references/runtime-bootstrap.md`. In web/cloud Codex, use `coding-tools-mcp` when available; in local Codex, use the direct local shell. Prefer `python -m pi_delegate doctor` as the canonical check.
-5. If module `pi_delegate` alone is missing and a local execution channel exists, self-heal by locating the verified source and running editable installation as defined in `references/runtime-bootstrap.md`. Do not reinstall for Node, Pi CLI, provider/model, timeout, or API failures.
-6. Choose the execution mode using `references/supervision-policy.md`. For Web/Cloud Codex, prefer detached `python -m pi_delegate start <task-file> --project <project-root>` for nontrivial, debugging, or uncertain-duration work, then poll `status`/`logs`; use blocking `run` only for clearly short tasks. Local Codex may use either form.
-7. Supervise rather than wait blindly. Default idle timeout is 300 seconds without Pi JSON activity; default hard timeout is 3600 seconds. Treat the hard limit as a safety ceiling, not a planning target. Split tasks that could plausibly consume most of the hour.
-8. Treat `RUN_STATE.json`, `RUN_RESULT.json`, `RESULT.json`, `REPORT.md`, stdout, and stderr as worker evidence, not final truth. Use `last_event_type`, `last_tool_name`, `last_progress`, and `idle_seconds` to understand whether Pi is thinking, using tools, retrying, settled, or stalled; never expose hidden thinking content.
-9. Read `RUN_RESULT.json`, `RESULT.json`, and `REPORT.md` as distinct artifacts; do not infer one from another. If a coding-tools-mcp read returns null, a mismatched resolved path, or `NOT_FOUND`, correct cwd-relative path resolution and retry once before classifying the evidence gap. Follow `references/acceptance-policy.md`.
-10. Independently inspect the real repository state and rerun the important acceptance checks. Codex must explicitly make the final `PASS / FAIL / BLOCKED` decision.
-11. If verification finds a concrete defect or an idle timeout, inspect partial logs/diff/evidence first, then create a smaller repair task with the observed failure and expected correction. Do not blindly rerun the same oversized task.
-12. Report the final status only from Codex's independent evidence.
+1. Inspect the target repository/context and determine whether this is Web/Cloud Codex or local Codex. Read `references/execution-routing.md` first.
+2. In Web/Cloud mode, attempt the work with Codex's own available tools/connectors. Do not bootstrap or probe Pi yet. In local mode, use the existing delegation policy from `references/delegation-policy.md`.
+3. In Web/Cloud mode, escalate only when a concrete Pi fallback condition from `execution-routing.md` is met. If only one portion is blocked, delegate only that portion rather than handing the whole task to Pi.
+4. When Pi will actually be used, define one bounded task with observable acceptance criteria, create `.ai/pi/runs/<task-id>/TASK.md` using `references/task-contract.md`, then establish/bootstrap the local runtime from `references/runtime-bootstrap.md`.
+5. If module `pi_delegate` alone is missing and a local execution channel exists, self-heal as defined in `runtime-bootstrap.md`. Do not reinstall for Node, Pi CLI, provider/model, timeout, or API failures.
+6. Choose blocking vs detached Pi execution using `references/supervision-policy.md`. Supervise rather than wait blindly. Default idle timeout is 300 seconds without Pi JSON activity; default hard timeout is 3600 seconds and is only a safety ceiling.
+7. Treat `RUN_STATE.json`, `RUN_RESULT.json`, `RESULT.json`, `REPORT.md`, stdout, and stderr as worker evidence, not final truth. Use `last_event_type`, `last_tool_name`, `last_progress`, and `idle_seconds` for operational telemetry; never expose hidden thinking content.
+8. When Pi was used, read `RUN_RESULT.json`, `RESULT.json`, and `REPORT.md` as distinct artifacts and follow `references/acceptance-policy.md`.
+9. Independently inspect the real repository state and rerun the important acceptance checks. Codex must explicitly make the final `PASS / FAIL / BLOCKED` decision whether or not Pi was used.
+10. If verification finds a defect or idle timeout, inspect partial logs/diff/evidence first, then create a smaller repair task when Pi is still the appropriate executor. Do not blindly rerun the same oversized task.
+11. Report the final status only from Codex's independent evidence.
 
 ## Non-negotiable runner contract
 

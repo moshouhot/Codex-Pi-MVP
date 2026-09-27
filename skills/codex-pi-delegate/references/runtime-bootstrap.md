@@ -1,12 +1,12 @@
 # Runtime Bootstrap
 
-Use this bootstrap before the first Pi delegation in a session, after an environment change, or when a previous run failed before Pi started.
+Use this bootstrap only when Pi will actually be used. In Web/Cloud Codex, routing is lazy: first attempt the task with Codex's own tools, and do not run `doctor`, inspect Pi, or install `pi-delegate` merely as a precaution. After a concrete Pi fallback decision, use this bootstrap before the first Pi delegation in the session, after an environment change, or when a previous run failed before Pi started.
 
 ## 1. Choose the local execution channel
 
 The Skill itself does not give a cloud/web Codex access to the user's Windows machine.
 
-- If running in a web/cloud Codex and `coding-tools-mcp` is available, use `coding-tools-mcp` for all local commands, file operations, doctor checks, installs, Pi runs, status reads, and acceptance commands.
+- If running in a web/cloud Codex and a Pi fallback has been selected, use `coding-tools-mcp` when available for local doctor checks, installs, Pi runs, status reads, and Pi evidence. Before fallback, use Codex's normal tools/connectors directly and do not initialize Pi.
 - If running in a local Codex/CLI/App with direct shell access to the target machine, use the local shell directly. Do not require `coding-tools-mcp` merely for consistency.
 - If neither direct local shell nor a local execution bridge is available, stop local delegation as `BLOCKED` and tell the user that a local execution channel is required. Do not pretend Pi can be launched from the cloud alone.
 
@@ -60,7 +60,7 @@ python -m pip install -e "<resolved-source>"
 python -m pi_delegate doctor
 ```
 
-This applies equally to:
+Once Pi fallback/usage has been selected, this applies equally to:
 
 - web/cloud Codex using `coding-tools-mcp`;
 - local Codex using its direct shell.
@@ -98,7 +98,7 @@ If those fail while `python -m pi_delegate doctor` is `READY`, continue using th
 
 ## 6. Web long-task entrypoint
 
-After `doctor` is `READY`, do not keep a long/uncertain Pi job inside one Web execution-bridge call. Use the detached supervisor workflow from `supervision-policy.md`:
+This section applies only after Web/Cloud Codex has selected Pi fallback and `doctor` is `READY`. Do not keep a long/uncertain Pi job inside one Web execution-bridge call. Use the detached supervisor workflow from `supervision-policy.md`:
 
 ```powershell
 python -m pi_delegate start <TASK.md> --project <project-root>

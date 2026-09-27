@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Pi Delegate"
-  short_description: "Codex plans and accepts; Pi implements and debugs."
+  short_description: "Web: Codex first, Pi fallback. Local: Codex plans, Pi executes."
 

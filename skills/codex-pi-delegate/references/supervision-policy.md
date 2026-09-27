@@ -1,6 +1,6 @@
 # Supervision Policy
 
-Use this policy after the runtime is `READY` and before starting Pi.
+Use this policy only after routing has selected Pi and the runtime is `READY`.
 
 ## Choose task size first
 
@@ -12,7 +12,7 @@ If a task times out or stalls, inspect partial evidence and divide the next task
 
 ## Web/Cloud execution
 
-For nontrivial, debugging, test-heavy, or uncertain-duration work, prefer:
+Web/Cloud Codex reaches this section only after a concrete fallback reason has been identified. For nontrivial, debugging, test-heavy, or uncertain-duration Pi fallback work, prefer:
 
 ```powershell
 python -m pi_delegate start <TASK.md> --project <project-root>
@@ -32,6 +32,8 @@ python -m pi_delegate result <run-dir>
 ```
 
 Blocking `run` is acceptable for short, predictable work where keeping one local command open is simpler.
+
+Do not interpret this section as permission to send ordinary Web coding/debugging work to Pi by default. Routing is decided first by `execution-routing.md`.
 
 ## Local Codex execution
 
