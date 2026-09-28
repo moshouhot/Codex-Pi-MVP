@@ -27,6 +27,9 @@ STATE_PERSIST_INTERVAL_SECONDS = 5.0
 READER_JOIN_SECONDS = 5.0
 TERMINATE_GRACE_SECONDS = 5.0
 _READ_CHUNK = 65536
+_COMPACT_TEXT_LIMIT = 4096
+WORKER_IDENTITY_FILE_NAME = "WORKER_IDENTITY.json"
+WORKER_IDENTITY_ENV_VAR = "PI_DELEGATE_WORKER_IDENTITY_PATH"
 
 
 def utc_now() -> str:
@@ -45,7 +48,10 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # Pi's settings.json may be rewritten by Windows tooling with a UTF-8 BOM.
+    # utf-8-sig accepts both BOM and non-BOM UTF-8, while json.loads(utf-8)
+    # rejects a leading BOM and previously made worker defaults silently vanish.
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise ValueError(f"expected JSON object: {path}")
     return data
@@ -153,6 +159,11 @@ class _ActivityClock:
         self._last_event_type: str | None = None
         self._last_tool_name: str | None = None
         self._last_progress = "worker starting"
+        self._last_progress_monotonic = self._last_monotonic
+        self._last_progress_wall = self._last_wall
+        self._last_progress_source = "start"
+        self._last_progress_event_type: str | None = None
+        self._last_progress_tool_name: str | None = None
 
     def touch(
         self,
@@ -161,6 +172,7 @@ class _ActivityClock:
         event_type: str | None = None,
         tool_name: str | None = None,
         progress: str | None = None,
+        useful_progress: bool = False,
     ) -> None:
         with self._lock:
             self._last_monotonic = time.monotonic()
@@ -170,8 +182,14 @@ class _ActivityClock:
                 self._last_event_type = event_type
             if tool_name is not None:
                 self._last_tool_name = tool_name
-            if progress is not None:
+            if progress is not None and useful_progress:
                 self._last_progress = progress
+            if useful_progress:
+                self._last_progress_monotonic = self._last_monotonic
+                self._last_progress_wall = self._last_wall
+                self._last_progress_source = source
+                self._last_progress_event_type = event_type
+                self._last_progress_tool_name = tool_name
 
     def snapshot(self) -> tuple[float, str]:
         with self._lock:
@@ -188,6 +206,13 @@ class _ActivityClock:
                 "last_event_type": self._last_event_type,
                 "last_tool_name": self._last_tool_name,
                 "last_progress": self._last_progress,
+                "last_progress_at": self._last_progress_wall,
+                "progress_idle_seconds": round(
+                    time.monotonic() - self._last_progress_monotonic, 3
+                ),
+                "last_progress_source": self._last_progress_source,
+                "last_progress_event_type": self._last_progress_event_type,
+                "last_progress_tool_name": self._last_progress_tool_name,
             }
 
 
@@ -216,7 +241,7 @@ def _pump_stream(
                 break
             if not chunk:
                 break
-            clock.touch(source=label, progress=f"{label} activity")
+            clock.touch(source=label)
             if sink is not None:
                 try:
                     sink.write(chunk)
@@ -261,6 +286,80 @@ def _event_details(event: dict[str, Any]) -> tuple[str, str | None, str]:
     return event_type, tool_name, progress
 
 
+def _is_useful_progress_event(event: dict[str, Any]) -> bool:
+    """Separate process activity from evidence that the delegated task advanced.
+
+    Thinking deltas, retries, compaction and stderr can prove the process is
+    alive, but they should not masquerade as task progress. This clock is
+    diagnostic only; the 300-second idle watchdog still uses all activity.
+    """
+    event_type = event.get("type")
+    if event_type in {"tool_execution_start", "tool_execution_update", "tool_execution_end", "agent_settled"}:
+        return True
+    if event_type in {"message_end", "agent_end"}:
+        return True
+    if event_type == "message_update":
+        nested = event.get("assistantMessageEvent")
+        if isinstance(nested, dict):
+            return nested.get("type") in {"text_delta", "toolcall_start", "toolcall_end"}
+    return False
+
+
+def _clip_text(value: Any, limit: int = _COMPACT_TEXT_LIMIT) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "...[truncated]"
+
+
+def _compact_json_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Keep diagnostic signal while dropping prompts, tool args/results and thinking text."""
+    event_type = str(event.get("type") or "json_event")
+    compact: dict[str, Any] = {"type": event_type}
+    if event_type == "session":
+        for key in ("version", "id", "timestamp"):
+            if key in event:
+                compact[key] = event[key]
+        return compact
+    if event_type in {"tool_execution_start", "tool_execution_update", "tool_execution_end"}:
+        for key in ("toolCallId", "toolName", "isError"):
+            if key in event:
+                compact[key] = event[key]
+        return compact
+    if event_type == "message_update":
+        nested = event.get("assistantMessageEvent")
+        if isinstance(nested, dict):
+            nested_type = str(nested.get("type") or "update")
+            compact["update_type"] = nested_type
+            for key in ("toolCallId", "toolName"):
+                if key in nested:
+                    compact[key] = nested[key]
+            # Keep only user-visible assistant text; never persist thinking deltas.
+            if nested_type == "text_delta":
+                text = _clip_text(nested.get("delta"))
+                if text is not None:
+                    compact["text"] = text
+        return compact
+    if event_type in {"message_start", "message_end"}:
+        message = event.get("message")
+        if isinstance(message, dict):
+            for key in ("role", "stopReason"):
+                if key in message:
+                    compact[key] = message[key]
+        return compact
+    if event_type == "auto_retry_start":
+        if "attempt" in event:
+            compact["attempt"] = event["attempt"]
+        message = _clip_text(event.get("errorMessage"), 512)
+        if message is not None:
+            compact["errorMessage"] = message
+        return compact
+    if event_type.startswith("compaction_") and "reason" in event:
+        compact["reason"] = event["reason"]
+    return compact
+
+
 def _tee_json_event(event: dict[str, Any]) -> None:
     """Surface concise useful progress without exposing thinking deltas."""
     event_type = event.get("type")
@@ -300,7 +399,7 @@ def _pump_json_stream(
     tee: bool,
 ) -> None:
     """Consume Pi JSONL stdout continuously and record structured progress."""
-    sink = open(sink_path, "wb")
+    sink = open(sink_path, "w", encoding="utf-8", newline="\n")
     pending = b""
     try:
         while True:
@@ -310,10 +409,25 @@ def _pump_json_stream(
                 break
             if not chunk:
                 break
-            clock.touch(source="stdout", progress="stdout bytes")
-            sink.write(chunk)
-            sink.flush()
+            clock.touch(source="stdout")
             pending += chunk
+            # Real Pi JSON mode emits JSONL. Keep an incomplete JSON object in
+            # memory until its newline so we can redact it safely. For legacy
+            # or diagnostic non-JSON stdout, preserve the old byte-streaming
+            # behavior instead of waiting for process exit.
+            if b"\n" not in pending and pending.lstrip() and not pending.lstrip().startswith(b"{"):
+                text = pending.decode("utf-8", "replace")
+                clock.touch(
+                    source="stdout_text",
+                    progress="stdout text",
+                    useful_progress=True,
+                )
+                sink.write(_clip_text(text) or "")
+                sink.flush()
+                if tee:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                pending = b""
             while b"\n" in pending:
                 raw_line, pending = pending.split(b"\n", 1)
                 raw_line = raw_line.rstrip(b"\r")
@@ -323,22 +437,41 @@ def _pump_json_stream(
                 try:
                     event = json.loads(text)
                 except json.JSONDecodeError:
+                    clock.touch(
+                        source="stdout_text",
+                        progress="stdout text",
+                        useful_progress=True,
+                    )
+                    sink.write((_clip_text(text) or "") + "\n")
+                    sink.flush()
                     if tee:
                         sys.stdout.write(text + "\n")
                         sys.stdout.flush()
                     continue
                 if isinstance(event, dict):
                     event_type, tool_name, progress = _event_details(event)
+                    useful_progress = _is_useful_progress_event(event)
                     clock.touch(
                         source="pi_json_event",
                         event_type=event_type,
                         tool_name=tool_name,
                         progress=progress,
+                        useful_progress=useful_progress,
                     )
+                    sink.write(json.dumps(_compact_json_event(event), ensure_ascii=False) + "\n")
+                    sink.flush()
                     if tee:
                         _tee_json_event(event)
         if pending:
             text = pending.decode("utf-8", "replace")
+            if text:
+                clock.touch(
+                    source="stdout_text",
+                    progress="stdout text",
+                    useful_progress=True,
+                )
+                sink.write((_clip_text(text) or "") + "\n")
+                sink.flush()
             if tee:
                 sys.stdout.write(text)
                 sys.stdout.flush()
@@ -400,6 +533,27 @@ def _validate_worker_result(worker_result_file: Path) -> tuple[bool, str | None]
         return False, str(exc)
 
 
+def _artifact_contract_observation(
+    *,
+    report_exists: bool,
+    worker_result_exists: bool,
+    worker_result_valid: bool,
+    worker_result_error: str | None,
+) -> tuple[str, list[str]]:
+    failures: list[str] = []
+    if not report_exists:
+        failures.append("REPORT.md missing")
+    if not worker_result_exists:
+        failures.append("RESULT.json missing")
+    elif not worker_result_valid:
+        failures.append(f"RESULT.json invalid: {worker_result_error or 'unknown error'}")
+    if not failures:
+        return "complete", []
+    if worker_result_exists and not worker_result_valid:
+        return "invalid", failures
+    return "incomplete", failures
+
+
 def tail_text(path: Path, *, lines: int = 50, max_bytes: int = 65536) -> str:
     """Return a bounded UTF-8 tail without loading an arbitrarily large log."""
     if lines < 1:
@@ -420,6 +574,122 @@ def tail_text(path: Path, *, lines: int = 50, max_bytes: int = 65536) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def resolve_worker_skill(project_root: Path, skill: str) -> Path:
+    """Resolve an explicit worker skill by path or by user/project skill name."""
+    spec = Path(skill).expanduser()
+    candidates: list[Path] = []
+    if spec.is_absolute():
+        candidates.append(spec)
+    else:
+        candidates.extend(
+            [
+                project_root / spec,
+                Path.home() / ".pi" / "agent" / "skills" / spec,
+                Path.home() / ".agents" / "skills" / spec,
+                project_root / ".pi" / "skills" / spec,
+                project_root / ".agents" / "skills" / spec,
+            ]
+        )
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate.is_dir() and (candidate / "SKILL.md").is_file():
+            return candidate
+        if candidate.is_file() and candidate.name.lower().endswith(".md"):
+            return candidate
+    raise ValueError(f"worker skill not found: {skill}")
+
+
+def _worker_identity_asset() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "worker_identity_extension.ts"
+
+
+def _read_worker_identity(run_dir: Path) -> dict[str, Any] | None:
+    path = run_dir / WORKER_IDENTITY_FILE_NAME
+    if not path.is_file():
+        return None
+    try:
+        return read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _is_pid_alive(pid: Any) -> bool | None:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 5:  # ERROR_ACCESS_DENIED still proves a process exists.
+                    return True
+                if error == 87:  # ERROR_INVALID_PARAMETER for a missing PID.
+                    return False
+                return None
+            try:
+                code = ctypes.c_ulong()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return None
+                return code.value == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+
+
+def _state_age_seconds(updated_at: Any) -> float | None:
+    if not isinstance(updated_at, str):
+        return None
+    try:
+        then = datetime.fromisoformat(updated_at)
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        return round(max(0.0, (datetime.now(timezone.utc) - then).total_seconds()), 3)
+    except ValueError:
+        return None
+
+
+def inspect_run_status(run_dir: Path) -> dict[str, Any]:
+    """Augment persisted state with current process-liveness evidence."""
+    state = read_json(run_dir / "RUN_STATE.json")
+    status = state.get("status")
+    supervisor_alive = _is_pid_alive(state.get("supervisor_pid"))
+    worker_alive = _is_pid_alive(state.get("worker_pid"))
+    if status != "RUNNING":
+        lifecycle = "terminal_state"
+    elif supervisor_alive is True and worker_alive is True:
+        lifecycle = "running_local_processes_alive"
+    elif supervisor_alive is False and worker_alive is True:
+        lifecycle = "supervisor_gone_worker_alive"
+    elif supervisor_alive is True and worker_alive is False:
+        lifecycle = "supervisor_alive_worker_gone"
+    elif supervisor_alive is False and worker_alive is False:
+        lifecycle = "stale_running_state_processes_gone"
+    else:
+        lifecycle = "running_liveness_indeterminate"
+    payload = dict(state)
+    payload["observed_at"] = utc_now()
+    payload["state_age_seconds"] = _state_age_seconds(state.get("updated_at"))
+    payload["supervisor_alive"] = supervisor_alive
+    payload["worker_alive"] = worker_alive
+    payload["lifecycle_classification"] = lifecycle
+    return payload
+
+
 def launch_task(
     *,
     project_root: Path,
@@ -430,6 +700,9 @@ def launch_task(
     provider: str | None = None,
     model: str | None = None,
     thinking: str | None = None,
+    worker_skills: list[str] | None = None,
+    include_context_files: bool = False,
+    discover_skills: bool = False,
 ) -> dict[str, Any]:
     """Launch a detached pi-delegate supervisor and return immediately.
 
@@ -474,6 +747,12 @@ def launch_task(
         command.extend(["--model", model])
     if thinking:
         command.extend(["--thinking", thinking])
+    if include_context_files:
+        command.append("--with-context-files")
+    if discover_skills:
+        command.append("--discover-skills")
+    for skill in worker_skills or []:
+        command.extend(["--skill", skill])
 
     supervisor_stdout = run_dir / "supervisor.stdout.txt"
     supervisor_stderr = run_dir / "supervisor.stderr.txt"
@@ -559,6 +838,9 @@ def run_task(
     provider: str | None = None,
     model: str | None = None,
     thinking: str | None = None,
+    worker_skills: list[str] | None = None,
+    include_context_files: bool = False,
+    discover_skills: bool = False,
     forensics_invocation_id: str | None = None,
     tee: bool = True,
     terminate_grace_seconds: float = TERMINATE_GRACE_SECONDS,
@@ -575,6 +857,7 @@ def run_task(
     run_result_file = run_dir / "RUN_RESULT.json"
     worker_result_file = run_dir / "RESULT.json"
     report_file = run_dir / "REPORT.md"
+    identity_file = run_dir / WORKER_IDENTITY_FILE_NAME
     supervisor_pid = os.getpid()
     supervisor_ppid = os.getppid()
     # The CLI passes the one-shot id consumed from ``start``'s private
@@ -596,6 +879,7 @@ def run_task(
     relative_task = task_file.relative_to(project_root).as_posix()
     prompt = (
         f"Read @{relative_task} and execute it exactly. "
+        "Treat TASK.md as the authoritative execution contract; do not broaden or redesign the task. "
         "Do not modify files outside the allowed paths stated in TASK.md. "
         "When finished, write both RESULT.json and REPORT.md in the task run directory, "
         "then give a concise final summary. RESULT.json must be valid JSON. "
@@ -604,6 +888,18 @@ def run_task(
     )
 
     command = [node, str(pi_cli), "--no-approve", "--no-session", "--mode", "json"]
+    if not include_context_files:
+        command.append("--no-context-files")
+    if not discover_skills:
+        command.append("--no-skills")
+    resolved_worker_skills = [
+        resolve_worker_skill(project_root, skill) for skill in (worker_skills or [])
+    ]
+    for skill_path in resolved_worker_skills:
+        command.extend(["--skill", str(skill_path)])
+    identity_asset = _worker_identity_asset()
+    if identity_asset.is_file():
+        command.extend(["--extension", str(identity_asset)])
     if provider:
         command.extend(["--provider", provider])
     if model:
@@ -614,11 +910,17 @@ def run_task(
 
     env = os.environ.copy()
     env["PI_SKIP_VERSION_CHECK"] = "1"
+    env[WORKER_IDENTITY_ENV_VAR] = str(identity_file)
     defaults = load_pi_defaults()
     selected = {
         "provider": provider or defaults.get("provider"),
         "model": model or defaults.get("model"),
         "thinking": thinking or defaults.get("thinking"),
+    }
+    selected_source = {
+        "provider": "cli" if provider else ("settings_default" if defaults.get("provider") else "unknown"),
+        "model": "cli" if model else ("settings_default" if defaults.get("model") else "unknown"),
+        "thinking": "cli" if thinking else ("settings_default" if defaults.get("thinking") else "unknown"),
     }
 
     # Exit forensics: attach a passive preload guard to genuine Node workers
@@ -641,6 +943,11 @@ def run_task(
         supervisor_pid=supervisor_pid,
         supervisor_ppid=supervisor_ppid,
         worker=selected,
+        worker_config_source=selected_source,
+        worker_runtime=_read_worker_identity(run_dir),
+        context_files_enabled=include_context_files,
+        discovered_skills_enabled=discover_skills,
+        worker_skills=[str(path) for path in resolved_worker_skills],
         worker_pid=None,
         elapsed_seconds=0.0,
         idle_seconds=0.0,
@@ -713,6 +1020,7 @@ def run_task(
                 last_persist = now_monotonic
                 _, last_wall = clock.snapshot()
                 activity_meta = clock.metadata()
+                runtime_identity = _read_worker_identity(run_dir)
                 write_state(
                     run_dir,
                     task_id,
@@ -722,6 +1030,11 @@ def run_task(
                     supervisor_pid=supervisor_pid,
                     supervisor_ppid=supervisor_ppid,
                     worker=selected,
+                    worker_config_source=selected_source,
+                    worker_runtime=runtime_identity,
+                    context_files_enabled=include_context_files,
+                    discovered_skills_enabled=discover_skills,
+                    worker_skills=[str(path) for path in resolved_worker_skills],
                     worker_pid=proc.pid,
                     elapsed_seconds=round(elapsed, 3),
                     idle_seconds=round(idle, 3),
@@ -771,6 +1084,7 @@ def run_task(
     assert proc is not None
     _, last_wall = clock.snapshot()
     activity_meta = clock.metadata()
+    runtime_identity = _read_worker_identity(run_dir)
     elapsed_seconds = round(time.monotonic() - started_monotonic, 3)
     recorder.append(
         "supervisor_worker_exit_observed",
@@ -789,6 +1103,14 @@ def run_task(
 
     if timeout_kind is not None:
         worker_result_valid, worker_result_error = _validate_worker_result(worker_result_file)
+        report_exists = report_file.is_file()
+        worker_result_exists = worker_result_file.is_file()
+        artifact_contract_status, contract_failures = _artifact_contract_observation(
+            report_exists=report_exists,
+            worker_result_exists=worker_result_exists,
+            worker_result_valid=worker_result_valid,
+            worker_result_error=worker_result_error,
+        )
         result = {
             "task_id": task_id,
             "runner_status": "TIMEOUT",
@@ -810,8 +1132,14 @@ def run_task(
             "project_root": str(project_root),
             "task_file": str(task_file),
             "worker": selected,
-            "report_exists": report_file.is_file(),
-            "worker_result_exists": worker_result_file.is_file(),
+            "worker_config_source": selected_source,
+            "worker_runtime": runtime_identity,
+            "worker_process_outcome": f"supervisor_{timeout_kind}_timeout",
+            "worker_process_observed_exit_code": proc.returncode,
+            "artifact_contract_status": artifact_contract_status,
+            "contract_failures": contract_failures,
+            "report_exists": report_exists,
+            "worker_result_exists": worker_result_exists,
             "worker_result_valid": worker_result_valid,
             "worker_result_error": worker_result_error,
             "runner_error": f"{timeout_kind}_timeout",
@@ -824,6 +1152,8 @@ def run_task(
             "TIMEOUT",
             forensics_invocation_id=recorder.invocation_id,
             worker=selected,
+            worker_config_source=selected_source,
+            worker_runtime=runtime_identity,
             supervisor_pid=supervisor_pid,
             supervisor_ppid=supervisor_ppid,
             worker_pid=proc.pid,
@@ -846,7 +1176,16 @@ def run_task(
 
     returncode = proc.returncode
     worker_result_valid, worker_result_error = _validate_worker_result(worker_result_file)
-    contract_ok = returncode == 0 and report_file.is_file() and worker_result_valid
+    report_exists = report_file.is_file()
+    worker_result_exists = worker_result_file.is_file()
+    artifact_contract_status, contract_failures = _artifact_contract_observation(
+        report_exists=report_exists,
+        worker_result_exists=worker_result_exists,
+        worker_result_valid=worker_result_valid,
+        worker_result_error=worker_result_error,
+    )
+    process_outcome = "exit_zero" if returncode == 0 else "exit_nonzero"
+    contract_ok = returncode == 0 and artifact_contract_status == "complete"
     final_status = "COMPLETED" if contract_ok else "FAILED"
     result = {
         "task_id": task_id,
@@ -869,8 +1208,14 @@ def run_task(
         "project_root": str(project_root),
         "task_file": str(task_file),
         "worker": selected,
-        "report_exists": report_file.is_file(),
-        "worker_result_exists": worker_result_file.is_file(),
+        "worker_config_source": selected_source,
+        "worker_runtime": runtime_identity,
+        "worker_process_outcome": process_outcome,
+        "worker_process_observed_exit_code": returncode,
+        "artifact_contract_status": artifact_contract_status,
+        "contract_failures": contract_failures,
+        "report_exists": report_exists,
+        "worker_result_exists": worker_result_exists,
         "worker_result_valid": worker_result_valid,
         "worker_result_error": worker_result_error,
         "exit_forensics": exit_forensics,
@@ -883,6 +1228,14 @@ def run_task(
         forensics_invocation_id=recorder.invocation_id,
         pi_exit_code=returncode,
         worker=selected,
+        worker_config_source=selected_source,
+        worker_runtime=runtime_identity,
+        worker_process_outcome=process_outcome,
+        artifact_contract_status=artifact_contract_status,
+        contract_failures=contract_failures,
+        context_files_enabled=include_context_files,
+        discovered_skills_enabled=discover_skills,
+        worker_skills=[str(path) for path in resolved_worker_skills],
         supervisor_pid=supervisor_pid,
         supervisor_ppid=supervisor_ppid,
         worker_pid=proc.pid,

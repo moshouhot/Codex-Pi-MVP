@@ -53,8 +53,13 @@ The runner invokes Pi with `--mode json`. Pi JSONL events, plus stderr activity,
 - `last_event_type`
 - `last_tool_name`
 - `last_progress`
+- `last_progress_at`
+- `progress_idle_seconds`
+- `last_progress_event_type`
 - `idle_timeout_seconds`
 - `hard_timeout_seconds`
+
+Treat **activity** and **useful progress** as different signals. Any Pi JSON event or stderr activity can keep the 300-second idle watchdog alive. `progress_idle_seconds` is diagnostic: MCP startup/retry or stderr chatter may prove the process is alive while the delegated TASK itself has not advanced. Do not automatically kill on progress-idle alone; inspect it when a worker looks busy but unproductive.
 
 Use these fields only as operational telemetry. Do not expose or reconstruct Pi's hidden chain of thought. A thinking event may prove the worker is active without revealing its private reasoning content.
 
@@ -74,6 +79,22 @@ On `timeout_kind=idle`:
 5. Replan and delegate a smaller repair/continuation task instead of blindly repeating the same task.
 
 On `timeout_kind=hard`, treat the task design itself as suspect unless there is strong evidence of a legitimately long bounded operation. Prefer splitting the next round rather than raising the ceiling.
+
+## Outer bridge timeout / lost caller
+
+An outer Codex or coding-tools-mcp timeout is not a Pi termination event. After losing the original call, query:
+
+```powershell
+python -m pi_delegate status <run-dir>
+```
+
+Use `lifecycle_classification` rather than guessing:
+
+- `running_local_processes_alive`: the local supervisor and Pi worker are still alive; continue polling, do not blindly restart;
+- `supervisor_gone_worker_alive`: supervisor disappeared while worker still exists; treat as an abnormal lifecycle finding and investigate before starting another worker;
+- `supervisor_alive_worker_gone`: supervisor remains but Pi worker disappeared; inspect RUN_STATE/forensics/logs;
+- `stale_running_state_processes_gone`: persisted RUNNING state is stale and both local processes are gone;
+- `terminal_state`: runner already persisted a terminal result.
 
 ## Detect direction drift
 

@@ -19,7 +19,19 @@ v0.2.1 进一步固化 coding-tools-mcp 的工具级路径规则和独立证据�
 
 v0.3 把固定 240 秒黑盒等待升级为 Supervisor：默认 **300 秒无 Pi 活动判定卡住**，总 hard timeout 为 **3600 秒**。Runner 使用 Pi 官方 `--mode json` 事件流，所以模型思考增量、tool call/tool execution、自动重试等都会刷新 activity；`RUN_STATE.json` 会记录 PID、elapsed、idle、last_activity、last_event_type、last_tool_name、last_progress 和超时配置。原始 JSONL 事件持续写入 `stdout.txt`，诊断写入 `stderr.txt`。3600 秒只是保险上限；Codex 应优先拆分任务，使单个委派明显早于该上限完成。
 
+v0.4 重点收口稳定性与可观测性，而不是继续增加 Agent 层：
+
+- delegated worker 默认关闭 `AGENTS.md` / `CLAUDE.md` 自动上下文和全局 Skill 自动发现（Pi `--no-context-files --no-skills`），避免小 TASK 被项目上下文带偏；需要专用能力时用重复的 `--skill <name-or-path>` 显式加载，例如 `--skill cent-cdp-browser`；
+- Pi settings JSON 使用 BOM-safe 读取，并通过本地 Pi extension 从 `ctx.model` / `ctx.thinkingLevel` 记录 `WORKER_IDENTITY.json`，把“配置期望值”与“实际运行时 provider/model/thinking”分开；
+- `stdout.txt` 只保留紧凑 JSON 事件元数据和可见文本，不再持久化完整 system prompt、thinking 内容、tool args/results；真机微型 smoke 从历史 239–493KB 降到 **6.3KB**；
+- 区分 `activity` 与 `useful progress`：stderr/MCP retry 可以证明进程还活着，但不会伪装成 TASK 已经推进；
+- `status` 会实时检查 supervisor / worker PID，并给出 `lifecycle_classification`，可区分“外层桥调用超时但本地任务仍活着”和“本地进程确实已经消失”；
+- `RUN_RESULT.json` 分离 `worker_process_outcome` 与 `artifact_contract_status`：即使 worker 已做完实质工作但 RESULT/REPORT 合同不完整，也不会把两者混成一个模糊的 FAILED；
+- Exit Forensics guard 只允许 supervisor 的直接 Pi worker 写当前 invocation，Node 子进程继承 `NODE_OPTIONS` 时不再产生跨 worker 噪声；过滤逻辑仍保留作第二道防线。
+
 Web/Cloud Codex 不应为长任务一直阻塞在一条 `exec_command` 上。由于 coding-tools-mcp 单条执行本身有更短的上限，推荐使用 `start` 启动本机 detached supervisor，然后用 `status` / `logs` 轮询，完成后再读取 `result` 并独立验收。
+
+如果外层 coding-tools-mcp / Codex 调用先超时，不要直接把它解释成 Pi crash。先执行 `status`：若返回 `running_local_processes_alive`，说明外层调用结束了，但本机 supervisor + worker 仍在正常运行。
 
 ## MVP 流程
 
@@ -63,6 +75,14 @@ python -m pi_delegate logs .ai/pi/runs/debug-001 --tail 50
 python -m pi_delegate result .ai/pi/runs/debug-001
 ```
 
+需要专用本地 Skill 时显式加载，不重新打开整个全局 Skill 集合：
+
+```powershell
+python -m pi_delegate start .ai/pi/runs/browser-001/TASK.md --project . --skill cent-cdp-browser
+```
+
+如确有必要才恢复旧式大上下文：`--with-context-files` 允许项目 `AGENTS.md/CLAUDE.md`，`--discover-skills` 允许自动 Skill 发现。delegated worker 默认两者均关闭。
+
 默认监督参数：
 
 - `--idle-timeout 300`：5 分钟没有 Pi JSON 事件或 stderr 活动即判定卡住并终止；
@@ -70,6 +90,8 @@ python -m pi_delegate result .ai/pi/runs/debug-001
 - 旧 `--timeout N` 仍兼容，并作为 hard timeout 覆盖值。
 
 `python -m pi_delegate` 是规范入口，不依赖 Python Scripts 是否在 PATH。安装为标准 CLI 后也可直接使用 `pi-delegate` 命令；项目仍保留 `python pi_runner.py run <task-id>` 兼容旧 MVP 用法。
+
+不要在新的委派路径里直接 spawn `pi` / Pi Node CLI。`pi_delegate` 负责非 TTY stdin EOF、Supervisor、超时、退出取证、身份记录和证据合同；绕过它会重新引入 Pi 等待 stdin 等旧问题。
 
 完成后查看：
 
@@ -88,6 +110,8 @@ python -m pi_delegate result .ai/pi/runs/debug-001
 - `source: "guard"`：由预加载的 CommonJS guard（`pi_delegate/assets/exit_forensics_guard.cjs`）在真实 Node worker 内产生，例如 `guard_start`、`js_process_exit`（JS 显式 `process.exit`）、`js_really_exit`、`before_exit`、`exit_event`、`uncaught_exception`。guard 只对真实 Node 运行时预加载；Python fake-Pi 测试替身不会加载它。
 
 guard 记录会按 worker PID 过滤：worker 派生的子 Node 进程会继承 `NODE_OPTIONS`，其 guard 记录不参与父 worker 的分类。
+
+v0.4 进一步在 guard 入口校验 parent PID：只有 supervisor 直接启动的 Pi worker 会写本次 forensic invocation；Node 后代进程在写入前就退出 guard。真机/真实 Node 回归中的 `foreign_guard_records_ignored` 为 `0`。
 
 `RUN_RESULT.json` 新增向后兼容的诊断字段 `exit_forensics`，其中包含 `termination_classification`、`classification_reasons`、`js_exit_requested`、`terminal_guard_evidence`、`supervisor_terminate_observed`、`worker_exit_code_normalized`（同时给出 raw / unsigned_32 / signed_32 / hex）等。
 

@@ -39,6 +39,8 @@ python -m pi_delegate doctor
 
 Use `pi-delegate doctor` only as a convenience after PATH registration is known to work. `python -m pi_delegate` is the stable contract because it does not depend on the Python Scripts directory being present in PATH.
 
+All delegated Pi execution should also go through `python -m pi_delegate run/start`. Do not create an auxiliary path that directly launches `pi`, `pi.exe`, `pi.ps1`, or the Pi Node CLI. The runner owns the required non-TTY stdin EOF behavior, Supervisor lifecycle, model identity evidence, compact event logging, and exit forensics.
+
 ## 3. Self-heal only a missing pi_delegate module
 
 If `python -m pi_delegate doctor` runs and returns JSON, do **not** reinstall `pi-delegate`. Diagnose the returned `reason_code` instead.

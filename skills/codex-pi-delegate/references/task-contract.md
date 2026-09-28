@@ -56,3 +56,5 @@ Do not claim final Codex acceptance.
 
 Treat this as worker testimony. Runner validity only means it is structurally usable; Codex still verifies the claims.
 
+When `Preferred local skill` is present, pass it explicitly with `pi-delegate --skill <name-or-path>`. Do not rely on automatic global Skill discovery for delegated workers.
+

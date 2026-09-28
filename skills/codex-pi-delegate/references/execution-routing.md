@@ -53,6 +53,8 @@ Use it first for real browser/CDP/Cent control. Do not reimplement its browser-l
 If the Skill is unavailable or does not support the required operation, report that explicitly before using another approach.
 ```
 
+Invoke the worker with explicit Skill routing, for example `--skill cent-cdp-browser`. Delegated workers disable automatic Skill discovery by default; do not reopen the whole global Skill catalog just to obtain one specialized capability.
+
 Do not duplicate `cent-cdp-browser`'s internal rules here. Its own Skill remains authoritative for Cent profile reuse, CDP startup/attach verification, browser interaction, Cloudflare/challenge handling, and other browser-specific safety/verification behavior.
 
 This specialized route does not apply to ordinary web research or remote browser automation that Codex can already perform reliably with its own tools.

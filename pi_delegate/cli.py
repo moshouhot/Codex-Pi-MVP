@@ -11,6 +11,7 @@ from .core import (
     DEFAULT_HARD_TIMEOUT_SECONDS,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     doctor,
+    inspect_run_status,
     launch_task,
     read_json,
     run_task,
@@ -24,7 +25,7 @@ def _print(data: object) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pi-delegate")
-    parser.add_argument("--version", action="version", version="pi-delegate 0.3.0")
+    parser.add_argument("--version", action="version", version="pi-delegate 0.4.0")
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="delegate a TASK.md to Pi and wait for completion")
@@ -55,6 +56,22 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model")
     run.add_argument("--thinking")
     run.add_argument(
+        "--skill",
+        action="append",
+        default=[],
+        help="explicit worker skill name/path; repeatable (automatic discovery is off by default)",
+    )
+    run.add_argument(
+        "--with-context-files",
+        action="store_true",
+        help="allow Pi to discover AGENTS.md/CLAUDE.md (off by default for delegated workers)",
+    )
+    run.add_argument(
+        "--discover-skills",
+        action="store_true",
+        help="allow Pi automatic skill discovery (off by default; prefer explicit --skill)",
+    )
+    run.add_argument(
         "--no-tee",
         action="store_true",
         help="do not mirror worker stdout/stderr to the supervising console",
@@ -72,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--provider")
     start.add_argument("--model")
     start.add_argument("--thinking")
+    start.add_argument("--skill", action="append", default=[], help="explicit worker skill name/path; repeatable")
+    start.add_argument("--with-context-files", action="store_true")
+    start.add_argument("--discover-skills", action="store_true")
 
     status = sub.add_parser("status", help="show RUN_STATE.json from a run directory")
     status.add_argument("run_dir", type=Path)
@@ -108,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
                 provider=args.provider,
                 model=args.model,
                 thinking=args.thinking,
+                worker_skills=args.skill,
+                include_context_files=args.with_context_files,
+                discover_skills=args.discover_skills,
                 forensics_invocation_id=invocation_id,
                 tee=not args.no_tee,
             )
@@ -123,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
                 provider=args.provider,
                 model=args.model,
                 thinking=args.thinking,
+                worker_skills=args.skill,
+                include_context_files=args.with_context_files,
+                discover_skills=args.discover_skills,
             )
             _print(payload)
             return 0
@@ -139,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
             _print(payload)
             return code
         if args.command == "status":
-            _print(read_json(args.run_dir / "RUN_STATE.json"))
+            _print(inspect_run_status(args.run_dir))
             return 0
         if args.command == "result":
             worker_path = args.run_dir / "RESULT.json"

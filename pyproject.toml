@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pi-delegate"
-version = "0.3.0"
+version = "0.4.0"
 description = "Reliable headless Codex-to-Pi delegation CLI"
 requires-python = ">=3.10"
 dependencies = []
@@ -18,5 +18,5 @@ packages = ["pi_delegate"]
 [tool.setuptools.package-data]
 # The exit-forensics guard is a runtime CommonJS asset, not importable Python,
 # so it must be declared as package data or the installed wheel omits it.
-pi_delegate = ["assets/*.cjs"]
+pi_delegate = ["assets/*.cjs", "assets/*.ts"]
 

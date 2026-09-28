@@ -41,10 +41,14 @@ Keep the established split unchanged:
 ## Non-negotiable runner contract
 
 Preserve these behaviors when troubleshooting or evolving the CLI:
+- route every delegated Pi launch through `pi-delegate`; do not add a new raw `pi` / Node spawn path that bypasses stdin EOF, supervision, identity evidence, or exit forensics;
 - invoke the Pi Node CLI directly in headless mode;
 - use Pi `--mode json` so structured agent/tool/retry events provide the activity signal;
 - use `--no-session` for delegated runs unless persistence is intentionally required;
 - close stdin explicitly (`DEVNULL`/EOF) so Pi does not wait forever in non-TTY mode;
+- default delegated workers to `--no-context-files --no-skills`; opt back into project context only deliberately, and prefer explicit repeatable `--skill <name-or-path>` for specialized worker capabilities;
+- keep configured/default worker identity separate from runtime identity captured from Pi; use `worker_runtime` as the stronger evidence of the provider/model/thinking that actually ran when available;
+- keep `stdout.txt` diagnostic and compact: do not persist full prompts, hidden thinking content, tool args, or tool results merely because Pi JSON mode exposes them;
 - for Web/Cloud long tasks, detach the local supervisor with `start` instead of attempting to keep one coding-tools-mcp command open for the full worker lifetime;
 - default to a 300-second idle timeout and 3600-second hard timeout unless the task requires a stricter bound;
 - persist `RUN_STATE.json` and `RUN_RESULT.json` for completion and failure paths;

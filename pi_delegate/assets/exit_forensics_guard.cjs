@@ -28,6 +28,13 @@
     }
 
     var invocationId = process.env.PI_DELEGATE_EXIT_FORENSICS_INVOCATION || null;
+    var expectedParentPid = Number(process.env.PI_DELEGATE_EXIT_FORENSICS_PARENT_PID || '');
+    if (Number.isFinite(expectedParentPid) && expectedParentPid > 0 && process.ppid !== expectedParentPid) {
+      // NODE_OPTIONS is inherited by Node descendants. Only the direct Pi
+      // worker (whose parent is the supervisor) may write this invocation's
+      // evidence; descendants otherwise create cross-worker forensic noise.
+      return;
+    }
 
     var fs = require('fs');
 

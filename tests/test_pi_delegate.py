@@ -67,11 +67,50 @@ sys.stderr.write("note\\n")
 sys.stderr.flush()
 """
 
+ARG_CAPTURE_SCRIPT = """
+import json, os, pathlib, sys
+run_dir = pathlib.Path(os.environ["FAKE_RUN_DIR"])
+(run_dir / "ARGS.json").write_text(json.dumps(sys.argv), encoding="utf-8")
+(run_dir / "RESULT.json").write_text(json.dumps({"task_id": "case", "status": "completed"}), encoding="utf-8")
+(run_dir / "REPORT.md").write_text("ok", encoding="utf-8")
+"""
+
+IDENTITY_SCRIPT = """
+import json, os, pathlib
+run_dir = pathlib.Path(os.environ["FAKE_RUN_DIR"])
+identity = pathlib.Path(os.environ["PI_DELEGATE_WORKER_IDENTITY_PATH"])
+identity.write_text(json.dumps({
+    "source": "pi_extension_ctx",
+    "phase": "agent_start",
+    "pid": os.getpid(),
+    "provider": "runtime-provider",
+    "model": "runtime-model",
+    "thinking": "high"
+}), encoding="utf-8")
+(run_dir / "RESULT.json").write_text(json.dumps({"task_id": "case", "status": "completed"}), encoding="utf-8")
+(run_dir / "REPORT.md").write_text("ok", encoding="utf-8")
+"""
+
+RESULT_WITHOUT_REPORT_SCRIPT = """
+import json, os, pathlib
+run_dir = pathlib.Path(os.environ["FAKE_RUN_DIR"])
+(run_dir / "RESULT.json").write_text(json.dumps({"task_id": "case", "status": "completed"}), encoding="utf-8")
+"""
+
+ARTIFACTS_THEN_HANG_SCRIPT = """
+import json, os, pathlib, time
+run_dir = pathlib.Path(os.environ["FAKE_RUN_DIR"])
+(run_dir / "RESULT.json").write_text(json.dumps({"task_id": "case", "status": "completed"}), encoding="utf-8")
+(run_dir / "REPORT.md").write_text("work already finished", encoding="utf-8")
+time.sleep(30)
+"""
+
 JSON_EVENT_SCRIPT = """
 import json, os, pathlib, sys, time
 run_dir = pathlib.Path(os.environ["FAKE_RUN_DIR"])
 events = [
     {"type": "session", "version": 3, "id": "test", "timestamp": "now", "cwd": str(run_dir)},
+    {"type": "message_start", "message": {"role": "system", "content": "SECRET_SYSTEM_PROMPT_" * 2000}},
     {"type": "agent_start"},
     {"type": "turn_start"},
     {"type": "message_update", "usage": {}, "assistantMessageEvent": {"type": "thinking_delta", "contentIndex": 0, "delta": "thinking"}},
@@ -274,13 +313,54 @@ class DetachedLaunchTests(unittest.TestCase):
 
     def test_cli_parses_start_and_run_no_tee(self):
         start_args = cli.build_parser().parse_args(
-            ["start", "TASK.md", "--idle-timeout", "300", "--hard-timeout", "3600"]
+            [
+                "start",
+                "TASK.md",
+                "--idle-timeout",
+                "300",
+                "--hard-timeout",
+                "3600",
+                "--skill",
+                "cent-cdp-browser",
+            ]
         )
         self.assertEqual(start_args.command, "start")
         self.assertEqual(start_args.idle_timeout, 300)
         self.assertEqual(start_args.hard_timeout, 3600)
-        run_args = cli.build_parser().parse_args(["run", "TASK.md", "--no-tee"])
+        self.assertEqual(start_args.skill, ["cent-cdp-browser"])
+        self.assertFalse(start_args.with_context_files)
+        self.assertFalse(start_args.discover_skills)
+        run_args = cli.build_parser().parse_args(
+            [
+                "run",
+                "TASK.md",
+                "--no-tee",
+                "--skill",
+                "cent-cdp-browser",
+                "--with-context-files",
+                "--discover-skills",
+            ]
+        )
         self.assertTrue(run_args.no_tee)
+        self.assertEqual(run_args.skill, ["cent-cdp-browser"])
+        self.assertTrue(run_args.with_context_files)
+        self.assertTrue(run_args.discover_skills)
+
+    def test_cli_status_uses_live_lifecycle_inspection(self):
+        payload = {
+            "status": "RUNNING",
+            "supervisor_alive": False,
+            "worker_alive": True,
+            "lifecycle_classification": "supervisor_gone_worker_alive",
+        }
+        import io
+
+        buffer = io.StringIO()
+        with mock.patch.object(cli, "inspect_run_status", return_value=payload) as inspect, contextlib.redirect_stdout(buffer):
+            code = cli.main(["status", "run-dir"])
+        self.assertEqual(code, 0)
+        inspect.assert_called_once_with(Path("run-dir"))
+        self.assertEqual(json.loads(buffer.getvalue()), payload)
 
     def test_cli_consumes_start_invocation_once(self):
         import io
@@ -336,6 +416,55 @@ class LogTailTests(unittest.TestCase):
             self.assertIsNone(payload["worker"])
 
 
+class ConfigAndStatusTests(unittest.TestCase):
+    def test_read_json_accepts_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "settings.json"
+            path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"ok": True}).encode("utf-8"))
+            self.assertEqual(core.read_json(path), {"ok": True})
+
+    def test_load_pi_defaults_accepts_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            settings = home / ".pi" / "agent" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            payload = {
+                "defaultProvider": "provider-a",
+                "defaultModel": "model-b",
+                "defaultThinkingLevel": "high",
+            }
+            settings.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
+            with mock.patch.object(core.Path, "home", return_value=home):
+                self.assertEqual(
+                    core.load_pi_defaults(),
+                    {"provider": "provider-a", "model": "model-b", "thinking": "high"},
+                )
+
+    def test_status_distinguishes_outer_timeout_from_dead_worker(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            core.write_state(
+                run_dir,
+                "live",
+                "RUNNING",
+                supervisor_pid=101,
+                worker_pid=202,
+            )
+            with mock.patch.object(core, "_is_pid_alive", side_effect=[True, True]):
+                status = core.inspect_run_status(run_dir)
+            self.assertTrue(status["supervisor_alive"])
+            self.assertTrue(status["worker_alive"])
+            self.assertEqual(status["lifecycle_classification"], "running_local_processes_alive")
+
+    def test_status_flags_stale_running_state_when_both_processes_are_gone(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            core.write_state(run_dir, "dead", "RUNNING", supervisor_pid=101, worker_pid=202)
+            with mock.patch.object(core, "_is_pid_alive", side_effect=[False, False]):
+                status = core.inspect_run_status(run_dir)
+            self.assertEqual(status["lifecycle_classification"], "stale_running_state_processes_gone")
+
+
 class SupervisorTests(unittest.TestCase):
     def test_successful_completion_and_devnull_stdin(self):
         with tempfile.TemporaryDirectory() as td:
@@ -358,6 +487,82 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(state["supervisor_pid"], os.getpid())
             self.assertEqual(state["supervisor_ppid"], os.getppid())
             self.assertEqual(result["supervisor_pid"], os.getpid())
+            self.assertEqual(result["worker_process_outcome"], "exit_zero")
+            self.assertEqual(result["artifact_contract_status"], "complete")
+            self.assertEqual(result["contract_failures"], [])
+
+    def test_worker_defaults_to_minimal_context_and_explicit_skills(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir, task = _make_run(root, "case-minimal-context")
+            skill_dir = root / "worker-skill"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text("---\nname: worker-skill\ndescription: test\n---\n", encoding="utf-8")
+            with _fake_pi(root, ARG_CAPTURE_SCRIPT, run_dir):
+                code, result = core.run_task(
+                    project_root=root,
+                    task_file=task,
+                    worker_skills=["worker-skill"],
+                    tee=False,
+                )
+            self.assertEqual(code, 0)
+            args = json.loads((run_dir / "ARGS.json").read_text(encoding="utf-8"))
+            self.assertIn("--no-context-files", args)
+            self.assertIn("--no-skills", args)
+            self.assertIn("--skill", args)
+            self.assertEqual(Path(args[args.index("--skill") + 1]), skill_dir.resolve())
+            self.assertIn("--extension", args)
+            self.assertFalse(result["context_files_enabled"] if "context_files_enabled" in result else False)
+
+    def test_runtime_identity_file_is_reported_separately_from_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir, task = _make_run(root, "case-runtime-id")
+            with _fake_pi(root, IDENTITY_SCRIPT, run_dir):
+                code, result = core.run_task(
+                    project_root=root,
+                    task_file=task,
+                    provider="configured-provider",
+                    model="configured-model",
+                    thinking="medium",
+                    tee=False,
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(result["worker"]["model"], "configured-model")
+            self.assertEqual(result["worker_config_source"]["model"], "cli")
+            self.assertEqual(result["worker_runtime"]["model"], "runtime-model")
+            self.assertEqual(result["worker_runtime"]["source"], "pi_extension_ctx")
+
+    def test_exit_zero_can_still_have_incomplete_artifact_contract(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir, task = _make_run(root, "case-contract-incomplete")
+            with _fake_pi(root, RESULT_WITHOUT_REPORT_SCRIPT, run_dir):
+                code, result = core.run_task(project_root=root, task_file=task, tee=False)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(result["runner_status"], "FAILED")
+            self.assertEqual(result["worker_process_outcome"], "exit_zero")
+            self.assertEqual(result["artifact_contract_status"], "incomplete")
+            self.assertIn("REPORT.md missing", result["contract_failures"])
+
+    def test_timeout_can_preserve_complete_worker_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir, task = _make_run(root, "case-artifacts-before-timeout")
+            with _fake_pi(root, ARTIFACTS_THEN_HANG_SCRIPT, run_dir):
+                code, result = core.run_task(
+                    project_root=root,
+                    task_file=task,
+                    idle_timeout_seconds=1,
+                    hard_timeout_seconds=30,
+                    tee=False,
+                    terminate_grace_seconds=0.2,
+                )
+            self.assertEqual(code, 124)
+            self.assertEqual(result["runner_status"], "TIMEOUT")
+            self.assertEqual(result["worker_process_outcome"], "supervisor_idle_timeout")
+            self.assertEqual(result["artifact_contract_status"], "complete")
+            self.assertEqual(result["contract_failures"], [])
 
     def test_run_uses_launcher_invocation_and_records_supervisor_lineage(self):
         with tempfile.TemporaryDirectory() as td:
@@ -470,6 +675,8 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(result["runner_status"], "COMPLETED")
             self.assertEqual(result["timeout_kind"], None)
+            self.assertEqual(result["last_activity_source"], "stderr")
+            self.assertGreaterEqual(result["progress_idle_seconds"], 1.0)
 
     def test_idle_timeout_semantics(self):
         with tempfile.TemporaryDirectory() as td:
@@ -587,8 +794,12 @@ class SupervisorTests(unittest.TestCase):
             raw_lines = (run_dir / "stdout.txt").read_text(encoding="utf-8").splitlines()
             self.assertTrue(raw_lines)
             self.assertEqual(json.loads(raw_lines[0])["type"], "session")
+            compact_log = "\n".join(raw_lines)
+            self.assertNotIn("SECRET_SYSTEM_PROMPT_", compact_log)
+            self.assertLess(len(compact_log), 8192)
             state = core.read_json(run_dir / "RUN_STATE.json")
             self.assertEqual(state["last_event_type"], "agent_settled")
+            self.assertEqual(state["last_progress_event_type"], "agent_settled")
 
     def test_tee_surfaces_live_output(self):
         import io
@@ -871,6 +1082,14 @@ class ExitForensicsUnitTests(unittest.TestCase):
         text = pyproject.read_text(encoding="utf-8")
         self.assertIn("[tool.setuptools.package-data]", text)
         self.assertIn("assets/*.cjs", text)
+        self.assertIn("assets/*.ts", text)
+
+    def test_worker_identity_extension_asset_exists(self):
+        asset = Path(core.__file__).resolve().parent / "assets" / "worker_identity_extension.ts"
+        self.assertTrue(asset.is_file())
+        source = asset.read_text(encoding="utf-8")
+        self.assertIn("ctx?.model", source)
+        self.assertIn("ctx?.thinkingLevel", source)
 
 
 class ExitForensicsIntegrationTests(unittest.TestCase):
@@ -1190,6 +1409,37 @@ class ExitForensicsRealNodeTests(unittest.TestCase):
         reason = " ".join(diagnostics["classification_reasons"]).lower()
         self.assertNotIn("proven", reason)
         self.assertNotIn("external killer", reason)
+
+    def test_node_child_inheriting_node_options_does_not_pollute_worker_forensics(self):
+        script = (
+            "const fs=require('fs'); const path=require('path'); const cp=require('child_process');\n"
+            "cp.spawnSync(process.execPath, ['-e', 'process.exit(0)'], {stdio:'ignore'});\n"
+            "const d=process.env.FAKE_RUN_DIR;\n"
+            "fs.writeFileSync(path.join(d,'RESULT.json'), JSON.stringify({task_id:'case-node-child',status:'completed'}));\n"
+            "fs.writeFileSync(path.join(d,'REPORT.md'),'ok');\n"
+            "process.exit(0);\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir, task = _make_run(root, "case-node-child")
+            cli_script = root / "fake_cli.js"
+            cli_script.write_text(script, encoding="utf-8")
+            node = shutil.which("node")
+            with mock.patch.object(core, "discover_pi_cli", return_value=cli_script), mock.patch.object(
+                core.shutil, "which", return_value=node
+            ), mock.patch.dict(os.environ, {"FAKE_RUN_DIR": str(run_dir)}):
+                code, result = core.run_task(project_root=root, task_file=task, tee=False)
+            self.assertEqual(code, 0)
+            diagnostics = result["exit_forensics"]
+            self.assertTrue(diagnostics["guard_started"])
+            self.assertEqual(diagnostics["foreign_guard_records_ignored"], 0)
+            guard_records = [
+                json.loads(line)
+                for line in (run_dir / forensics.FORENSICS_FILE_NAME).read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("source") == "guard"
+            ]
+            self.assertTrue(guard_records)
+            self.assertEqual({record["pid"] for record in guard_records}, {result["worker_pid"]})
 
 
 class DoctorTests(unittest.TestCase):

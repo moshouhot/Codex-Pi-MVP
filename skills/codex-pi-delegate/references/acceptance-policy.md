@@ -8,6 +8,7 @@ Before reading evidence through coding-tools-mcp, re-resolve its current/default
 
 1. Read `RUN_STATE.json` and require a terminal state rather than stale `RUNNING`.
 2. Read `RUN_RESULT.json` separately. A normal acceptance candidate requires Pi exit 0, `runner_status=COMPLETED`, `worker_result_valid=true`, and report/result presence flags true. A `TIMEOUT` remains a runner failure state even if Pi managed to write valid worker artifacts before termination.
+   Also read `worker_process_outcome` and `artifact_contract_status` separately. They answer different questions: whether the worker process exited/was timed out, and whether `RESULT.json + REPORT.md` satisfied the worker evidence contract.
 3. Read Pi-owned `RESULT.json` separately. Confirm its `task_id` matches the delegated task and treat all worker claims as testimony, not acceptance.
 4. Read Pi-owned `REPORT.md` separately. Confirm the content belongs to the same task and is not accidentally a response returned for another file path.
 5. If any evidence read returns null, `NOT_FOUND`, an unexpected resolved path, or content whose reported path does not match the requested artifact, retry exactly once after correcting cwd-relative path resolution. If the second read is still inconsistent, do not silently accept; classify evidence retrieval as `BLOCKED` unless the missing evidence can be independently reproduced from the real repository state.
@@ -17,5 +18,7 @@ Before reading evidence through coding-tools-mcp, re-resolve its current/default
 9. Check the task's functional contract and edge cases, especially anything affecting APIs, algorithms, state, transactions, concurrency, or security.
 10. Decide one status: `PASS`, `FAIL`, or `BLOCKED` from independent evidence, and state that Codex made this final decision.
 
-For an idle timeout, inspect partial worker artifacts/logs and the actual diff first. Preserve valid in-scope partial work when useful, but do not relabel the timed-out run as completed. A repair round should state the concrete evidence and be narrower than the stalled task when possible. Do not merely say “fix it”.
+For an idle timeout, inspect partial worker artifacts/logs and the actual diff first. `artifact_contract_status=complete` can coexist with `runner_status=TIMEOUT`; this means the artifacts exist and validate, not that the timed-out process should be relabeled as a normal completion. Preserve valid in-scope partial work when useful. A repair round should state the concrete evidence and be narrower than the stalled task when possible. Do not merely say “fix it”.
+
+When runtime identity evidence is available, compare `worker_runtime` against the requested/configured `worker` values. A null or mismatched runtime identity is an observability finding; do not claim a specific provider/model/thinking was proven solely from defaults.
 
