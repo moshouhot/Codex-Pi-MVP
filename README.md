@@ -77,3 +77,30 @@ python -m pi_delegate result .ai/pi/runs/debug-001
 - `runs/smoke-001/stderr.txt`
 - `runs/smoke-001/RUN_RESULT.json`
 - `runs/smoke-001/REPORT.md`
+
+## 退出取证（Exit Forensics）
+
+当 Pi/Node worker 异常终止（典型是 Windows 上退出码 `0xFFFFFFFF` / signed `-1`）时，Supervisor 会追加一份只读证据，用来事后保守分类“进程是怎么结束的”。取证层是**纯观测**的：它不吞掉、不转换、不重试任何失败，也不改变 `runner_status`、`timeout_kind`、`pi_exit_code` 的既有语义。
+
+证据文件是运行目录下的 `EXIT_FORENSICS.jsonl`，**追加写**（append-only）：同一运行目录被复用时旧证据不会被删除，每条记录带 `invocation` 字段，本次调用的报告只统计本次 `invocation` 的记录。记录分两类：
+
+- `source: "supervisor"`：父进程侧动作，例如 `supervisor_spawn_observed`（spawn 已发生）、`supervisor_terminate_attempt` / `supervisor_kill_attempt`（超时触发的终止/强杀尝试）、`supervisor_worker_exit_observed`（观察到的最终退出码）。
+- `source: "guard"`：由预加载的 CommonJS guard（`pi_delegate/assets/exit_forensics_guard.cjs`）在真实 Node worker 内产生，例如 `guard_start`、`js_process_exit`（JS 显式 `process.exit`）、`js_really_exit`、`before_exit`、`exit_event`、`uncaught_exception`。guard 只对真实 Node 运行时预加载；Python fake-Pi 测试替身不会加载它。
+
+guard 记录会按 worker PID 过滤：worker 派生的子 Node 进程会继承 `NODE_OPTIONS`，其 guard 记录不参与父 worker 的分类。
+
+`RUN_RESULT.json` 新增向后兼容的诊断字段 `exit_forensics`，其中包含 `termination_classification`、`classification_reasons`、`js_exit_requested`、`terminal_guard_evidence`、`supervisor_terminate_observed`、`worker_exit_code_normalized`（同时给出 raw / unsigned_32 / signed_32 / hex）等。
+
+### 如何保守解读 `0xFFFFFFFF`
+
+`0xFFFFFFFF`（signed `-1`）**不等于**“被外部杀进程杀掉”。只有当以下证据同时成立时，分类才会是 `abrupt_external_or_native_termination`：
+
+- 有 guard 启动证据（guard 确实加载过），且
+- 没有 JS 显式退出请求（无 `js_process_exit` / `js_really_exit`），且
+- 没有未捕获异常证据，且
+- 没有到达终端退出事件（无 `exit_event`），且
+- Supervisor 没有记录过终止/强杀动作。
+
+即便如此，该标签的含义也只是**“与突然的外部/原生终止一致”**，而不是证明了外部杀手。若 guard 观察到了终端 `exit_event`，则更可能是普通错误退出；若 JS 显式请求了退出，则归类为 JS 主动退出。
+
+证据只记录白名单元数据：时间戳、pid/ppid、cwd、Node 版本/平台/架构、退出码、事件类型和有界堆栈/错误信息。**不记录** prompt 文本、凭据、完整 argv、可执行文件路径、脚本名、环境变量值或工具参数。

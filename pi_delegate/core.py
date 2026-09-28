@@ -10,7 +10,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from . import forensics
 
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -347,10 +349,18 @@ def _pump_json_stream(
 def _terminate_process(
     proc: subprocess.Popen,
     grace_seconds: float = TERMINATE_GRACE_SECONDS,
+    on_action: Callable[[str], None] | None = None,
 ) -> None:
-    """Best-effort, bounded termination. Never blocks indefinitely."""
+    """Best-effort, bounded termination. Never blocks indefinitely.
+
+    ``on_action`` receives ``"terminate"`` / ``"kill"`` for every signal the
+    supervisor attempts, including attempts that raise ``OSError``. The record
+    documents intent only; it does not prove signal delivery or causation.
+    """
     if proc.poll() is not None:
         return
+    if on_action is not None:
+        on_action("terminate")
     try:
         proc.terminate()
     except OSError:
@@ -360,6 +370,8 @@ def _terminate_process(
         return
     except subprocess.TimeoutExpired:
         pass
+    if on_action is not None:
+        on_action("kill")
     try:
         proc.kill()
     except OSError:
@@ -465,16 +477,28 @@ def launch_task(
 
     supervisor_stdout = run_dir / "supervisor.stdout.txt"
     supervisor_stderr = run_dir / "supervisor.stderr.txt"
+    launcher_recorder = forensics.ForensicsRecorder(run_dir, source="launcher")
+    supervisor_env = os.environ.copy()
+    # A nested start gets a fresh identity even if this launcher was itself
+    # started by an instrumented Node worker with a different invocation id.
+    # Use a separate one-shot variable so this token is not inherited by Node.
+    supervisor_env.pop(forensics.FORENSICS_INVOCATION_ENV_VAR, None)
+    supervisor_env[forensics.FORENSICS_START_INVOCATION_ENV_VAR] = (
+        launcher_recorder.invocation_id
+    )
     launch_kwargs: dict[str, Any] = {
         "cwd": project_root,
         "stdin": subprocess.DEVNULL,
         "close_fds": True,
+        "env": supervisor_env,
     }
+    creation_flags = 0
     if os.name == "nt":
-        launch_kwargs["creationflags"] = (
+        creation_flags = (
             getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         )
+        launch_kwargs["creationflags"] = creation_flags
     else:
         launch_kwargs["start_new_session"] = True
 
@@ -487,10 +511,33 @@ def launch_task(
             **launch_kwargs,
         )
 
+    launcher_pid = os.getpid()
+    launcher_ppid = os.getppid()
+    detached_process = bool(creation_flags & getattr(subprocess, "DETACHED_PROCESS", 0x8))
+    new_process_group = bool(
+        creation_flags & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+    )
+    launcher_recorder.append(
+        "launcher_spawn_observed",
+        launcher_ppid=launcher_ppid,
+        supervisor_pid=proc.pid,
+        process_creation_flags=creation_flags,
+        detached_process=detached_process,
+        new_process_group=(new_process_group or bool(launch_kwargs.get("start_new_session"))),
+        start_new_session=bool(launch_kwargs.get("start_new_session", False)),
+    )
+
     return {
         "task_id": task_id,
         "launch_status": "STARTED",
+        "launcher_pid": launcher_pid,
+        "launcher_ppid": launcher_ppid,
         "supervisor_pid": proc.pid,
+        "supervisor_invocation_id": launcher_recorder.invocation_id,
+        "process_creation_flags": creation_flags,
+        "detached_process": detached_process,
+        "new_process_group": (new_process_group or bool(launch_kwargs.get("start_new_session"))),
+        "start_new_session": bool(launch_kwargs.get("start_new_session", False)),
         "run_dir": str(run_dir),
         "project_root": str(project_root),
         "task_file": str(task_file),
@@ -512,6 +559,7 @@ def run_task(
     provider: str | None = None,
     model: str | None = None,
     thinking: str | None = None,
+    forensics_invocation_id: str | None = None,
     tee: bool = True,
     terminate_grace_seconds: float = TERMINATE_GRACE_SECONDS,
     reader_join_seconds: float = READER_JOIN_SECONDS,
@@ -527,6 +575,16 @@ def run_task(
     run_result_file = run_dir / "RUN_RESULT.json"
     worker_result_file = run_dir / "RESULT.json"
     report_file = run_dir / "REPORT.md"
+    supervisor_pid = os.getpid()
+    supervisor_ppid = os.getppid()
+    # The CLI passes the one-shot id consumed from ``start``'s private
+    # environment variable. Direct calls get a new invocation id each time.
+    recorder = forensics.ForensicsRecorder(run_dir, invocation_id=forensics_invocation_id)
+    recorder.append(
+        "supervisor_start",
+        supervisor_pid=supervisor_pid,
+        supervisor_ppid=supervisor_ppid,
+    )
 
     pi_cli = discover_pi_cli()
     if not pi_cli.is_file():
@@ -563,6 +621,14 @@ def run_task(
         "thinking": thinking or defaults.get("thinking"),
     }
 
+    # Exit forensics: attach a passive preload guard to genuine Node workers
+    # only. The Python fake-Pi harness (sys.executable) is left untouched.
+    # Evidence is appended, never truncated, so a re-used run directory keeps
+    # its earlier evidence; only this invocation's records are reported.
+    preload_active = forensics.build_preload_env(
+        env, recorder.path, node, invocation_id=recorder.invocation_id
+    )
+
     started_monotonic = time.monotonic()
     started_at = utc_now()
     clock = _ActivityClock()
@@ -571,6 +637,9 @@ def run_task(
         task_id,
         "RUNNING",
         started_at=started_at,
+        forensics_invocation_id=recorder.invocation_id,
+        supervisor_pid=supervisor_pid,
+        supervisor_ppid=supervisor_ppid,
         worker=selected,
         worker_pid=None,
         elapsed_seconds=0.0,
@@ -583,6 +652,18 @@ def run_task(
     proc: subprocess.Popen | None = None
     threads: list[threading.Thread] = []
     timeout_kind: str | None = None
+    termination_cause: str | None = None
+    termination_exception_type: str | None = None
+
+    def _record_termination(action: str) -> None:
+        recorder.append(
+            f"supervisor_{action}_attempt",
+            worker_pid=proc.pid if proc is not None else None,
+            timeout_kind=timeout_kind,
+            termination_cause=termination_cause,
+            exception_type=termination_exception_type,
+        )
+
     try:
         proc = subprocess.Popen(
             command,
@@ -594,6 +675,17 @@ def run_task(
         )
         assert proc.stdout is not None and proc.stderr is not None
         clock.touch(source="process", progress="Pi process started")
+        # Evidence metadata is deliberately restricted to the allowlist in
+        # TASK.md: no executable path, no argv/command, no environment values.
+        recorder.append(
+            "supervisor_spawn_observed",
+            supervisor_pid=supervisor_pid,
+            supervisor_ppid=supervisor_ppid,
+            worker_pid=proc.pid,
+            worker_ppid=supervisor_pid,
+            preload_active=preload_active,
+        )
+
         threads = [
             threading.Thread(
                 target=_pump_json_stream,
@@ -626,6 +718,9 @@ def run_task(
                     task_id,
                     "RUNNING",
                     started_at=started_at,
+                    forensics_invocation_id=recorder.invocation_id,
+                    supervisor_pid=supervisor_pid,
+                    supervisor_ppid=supervisor_ppid,
                     worker=selected,
                     worker_pid=proc.pid,
                     elapsed_seconds=round(elapsed, 3),
@@ -637,16 +732,34 @@ def run_task(
                 )
             if idle >= idle_limit:
                 timeout_kind = "idle"
-                _terminate_process(proc, terminate_grace_seconds)
+                termination_cause = "idle_timeout"
+                _terminate_process(
+                    proc, terminate_grace_seconds, on_action=_record_termination
+                )
                 break
             if elapsed >= hard_limit:
                 timeout_kind = "hard"
-                _terminate_process(proc, terminate_grace_seconds)
+                termination_cause = "hard_timeout"
+                _terminate_process(
+                    proc, terminate_grace_seconds, on_action=_record_termination
+                )
                 break
             time.sleep(POLL_INTERVAL_SECONDS)
-    except BaseException:
+    except BaseException as exc:
+        termination_cause = "supervisor_exception"
+        termination_exception_type = type(exc).__name__
+        recorder.append(
+            "supervisor_exception_observed",
+            supervisor_pid=supervisor_pid,
+            supervisor_ppid=supervisor_ppid,
+            exception_type=termination_exception_type,
+        )
         if proc is not None:
-            _terminate_process(proc, terminate_grace_seconds)
+            _terminate_process(
+                proc,
+                terminate_grace_seconds,
+                on_action=_record_termination,
+            )
         raise
     finally:
         for thread in threads:
@@ -659,6 +772,20 @@ def run_task(
     _, last_wall = clock.snapshot()
     activity_meta = clock.metadata()
     elapsed_seconds = round(time.monotonic() - started_monotonic, 3)
+    recorder.append(
+        "supervisor_worker_exit_observed",
+        worker_pid=proc.pid,
+        returncode=proc.returncode,
+        returncode_normalized=forensics.format_exit_code(proc.returncode),
+        timeout_kind=timeout_kind,
+    )
+    exit_forensics = forensics.build_forensics_report(
+        returncode=proc.returncode,
+        timeout_kind=timeout_kind,
+        records=recorder.read_records(),
+        preload_active=preload_active,
+        worker_pid=proc.pid,
+    )
 
     if timeout_kind is not None:
         worker_result_valid, worker_result_error = _validate_worker_result(worker_result_file)
@@ -667,6 +794,9 @@ def run_task(
             "runner_status": "TIMEOUT",
             "timeout_kind": timeout_kind,
             "pi_exit_code": None,
+            "forensics_invocation_id": recorder.invocation_id,
+            "supervisor_pid": supervisor_pid,
+            "supervisor_ppid": supervisor_ppid,
             "worker_pid": proc.pid,
             "duration_seconds": elapsed_seconds,
             "elapsed_seconds": elapsed_seconds,
@@ -685,13 +815,17 @@ def run_task(
             "worker_result_valid": worker_result_valid,
             "worker_result_error": worker_result_error,
             "runner_error": f"{timeout_kind}_timeout",
+            "exit_forensics": exit_forensics,
         }
         write_json(run_result_file, result)
         write_state(
             run_dir,
             task_id,
             "TIMEOUT",
+            forensics_invocation_id=recorder.invocation_id,
             worker=selected,
+            supervisor_pid=supervisor_pid,
+            supervisor_ppid=supervisor_ppid,
             worker_pid=proc.pid,
             timeout_kind=timeout_kind,
             started_at=started_at,
@@ -701,6 +835,12 @@ def run_task(
             idle_timeout_seconds=idle_limit,
             hard_timeout_seconds=hard_limit,
             **activity_meta,
+        )
+        recorder.append(
+            "supervisor_result_written",
+            runner_status="TIMEOUT",
+            supervisor_cli_exit_code=124,
+            worker_pid=proc.pid,
         )
         return 124, result
 
@@ -713,6 +853,9 @@ def run_task(
         "runner_status": final_status,
         "timeout_kind": None,
         "pi_exit_code": returncode,
+        "forensics_invocation_id": recorder.invocation_id,
+        "supervisor_pid": supervisor_pid,
+        "supervisor_ppid": supervisor_ppid,
         "worker_pid": proc.pid,
         "duration_seconds": elapsed_seconds,
         "elapsed_seconds": elapsed_seconds,
@@ -730,14 +873,18 @@ def run_task(
         "worker_result_exists": worker_result_file.is_file(),
         "worker_result_valid": worker_result_valid,
         "worker_result_error": worker_result_error,
+        "exit_forensics": exit_forensics,
     }
     write_json(run_result_file, result)
     write_state(
         run_dir,
         task_id,
         final_status,
+        forensics_invocation_id=recorder.invocation_id,
         pi_exit_code=returncode,
         worker=selected,
+        supervisor_pid=supervisor_pid,
+        supervisor_ppid=supervisor_ppid,
         worker_pid=proc.pid,
         timeout_kind=None,
         started_at=started_at,
@@ -748,7 +895,14 @@ def run_task(
         hard_timeout_seconds=hard_limit,
         **activity_meta,
     )
-    return (0 if contract_ok else (returncode or 4)), result
+    supervisor_cli_exit_code = 0 if contract_ok else (returncode or 4)
+    recorder.append(
+        "supervisor_result_written",
+        runner_status=final_status,
+        supervisor_cli_exit_code=supervisor_cli_exit_code,
+        worker_pid=proc.pid,
+    )
+    return supervisor_cli_exit_code, result
 
 
 def doctor() -> tuple[int, dict[str, Any]]:

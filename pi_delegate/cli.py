@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
+from . import forensics
 from .core import (
     DEFAULT_HARD_TIMEOUT_SECONDS,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -94,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "run":
+            invocation_id = os.environ.pop(
+                forensics.FORENSICS_START_INVOCATION_ENV_VAR, None
+            )
             code, payload = run_task(
                 project_root=args.project,
                 task_file=args.task,
@@ -103,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
                 provider=args.provider,
                 model=args.model,
                 thinking=args.thinking,
+                forensics_invocation_id=invocation_id,
                 tee=not args.no_tee,
             )
             _print(payload)

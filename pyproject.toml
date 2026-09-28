@@ -15,3 +15,8 @@ pi-delegate = "pi_delegate.cli:main"
 [tool.setuptools]
 packages = ["pi_delegate"]
 
+[tool.setuptools.package-data]
+# The exit-forensics guard is a runtime CommonJS asset, not importable Python,
+# so it must be declared as package data or the installed wheel omits it.
+pi_delegate = ["assets/*.cjs"]
+
